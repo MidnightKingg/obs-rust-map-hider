@@ -100,6 +100,7 @@ class MapToggler:
         self.reveal_timer = None
         self._reveal_token = 0
         self.hotkey_down = False
+        self._obs_hint_shown = False
         self._lock = threading.RLock()
         self.fade_filter_name = self.config.get('fade_filter_name', 'Opacity')
         self.pin_hotkey = self.config.get('pin_hotkey', 'f6')
@@ -135,10 +136,10 @@ class MapToggler:
         handler = logging.StreamHandler()
         handler.setFormatter(ColorFormatter(datefmt="%H:%M:%S"))
         logging.basicConfig(level=level, handlers=[handler])
-        # obsws_python logs connection parameters — including the WebSocket
-        # password — at INFO level. Suppress it so the password never appears
-        # in the console (which streamers often show on stream).
-        logging.getLogger("obsws_python").setLevel(logging.WARNING)
+        # obsws_python logs the WebSocket password at INFO and full connection
+        # tracebacks at ERROR. Every failure is already caught and reported by
+        # this script's own handlers, so silence the library entirely.
+        logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
 
     def _print_banner(self):
         """Print the startup banner with the active configuration."""
@@ -198,10 +199,37 @@ class MapToggler:
                 port=self.config['obs_port'],
                 password=self.config['obs_password']
             )
-            logging.info("Connected to OBS WebSocket")
+            self._obs_hint_shown = False
+            logging.info(_c("● Connected to OBS", GREEN))
             return True
+        except ConnectionRefusedError:
+            # OBS is not running or its WebSocket server is disabled — the
+            # normal state before the streamer opens OBS. Report it once with
+            # hints, then keep retries to one quiet line instead of spamming
+            # tracebacks every interval.
+            if not self._obs_hint_shown:
+                logging.warning(
+                    _c(
+                        f"Can't reach OBS at "
+                        f"{self.config['obs_host']}:{self.config['obs_port']} "
+                        f"— retrying every "
+                        f"{self.config.get('reconnect_interval_s', 5)} s",
+                        YELLOW,
+                    )
+                )
+                logging.info(
+                    _c(
+                        "  check: OBS is running · WebSocket enabled "
+                        "(Tools → WebSocket Server Settings) · port matches config.json",
+                        GREY,
+                    )
+                )
+                self._obs_hint_shown = True
+            else:
+                logging.info(_c("… still waiting for OBS", GREY))
+            return False
         except Exception as e:
-            logging.error(f"Failed to connect to OBS: {e}")
+            logging.warning(f"Could not connect to OBS: {e}")
             return False
 
     def disconnect_obs(self):
@@ -486,7 +514,7 @@ class MapToggler:
         """Background thread to handle OBS reconnection"""
         while self.is_running:
             if not self.obs_client:
-                logging.info("Attempting to reconnect to OBS...")
+                # connect_obs reports unreachable/wrong-password states itself
                 if self.connect_obs():
                     mode = self.config.get('mode', 'toggle')
                     if mode == 'hold':
