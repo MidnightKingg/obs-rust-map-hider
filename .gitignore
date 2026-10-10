@@ -1,0 +1,12 @@
+# Local configuration — contains your OBS WebSocket password.
+# Copy config.example.json to config.json and edit it locally.
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs
+*.log
