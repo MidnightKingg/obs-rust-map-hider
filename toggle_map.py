@@ -10,6 +10,7 @@ The "RustMap" source is treated as a COVER overlay:
 
 import json
 import logging
+import os
 import time
 import threading
 import signal
@@ -19,6 +20,70 @@ from typing import Optional, Dict, Any
 
 import obsws_python as obs
 import keyboard
+
+APP_NAME = "OBS MAP HIDER"
+APP_VERSION = "1.1.0"
+
+# --- console styling ---------------------------------------------------------
+
+RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
+CYAN, GREEN, YELLOW, RED, GREY = (
+    "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[90m",
+)
+
+
+def _enable_ansi() -> bool:
+    """Return True when ANSI colors should be used.
+
+    Native on Linux; on Windows the console must have virtual terminal
+    processing enabled first. Honors NO_COLOR and disables when piped.
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return False
+            kernel32.SetConsoleMode(
+                handle, mode.value | 4  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            )
+        except Exception:
+            return False
+    return True
+
+
+_COLOR = _enable_ansi()
+
+
+def _c(text: str, *codes: str) -> str:
+    """Wrap text in ANSI codes when colors are enabled."""
+    if not _COLOR or not codes:
+        return text
+    return "".join(codes) + text + RESET
+
+
+class ColorFormatter(logging.Formatter):
+    """Pads the level name to a fixed column and colorizes it."""
+
+    LEVEL_COLORS = {
+        "DEBUG": GREY,
+        "INFO": CYAN,
+        "WARNING": YELLOW,
+        "ERROR": RED,
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        level = f"{record.levelname:<7}"
+        color = self.LEVEL_COLORS.get(record.levelname)
+        if color:
+            level = _c(level, color)
+        return f"{self.formatTime(record, self.datefmt)}  {level} {record.getMessage()}"
 
 
 class MapToggler:
@@ -67,15 +132,58 @@ class MapToggler:
     def _setup_logging(self):
         """Setup logging configuration"""
         level = getattr(logging, self.config.get('log_level', 'INFO').upper())
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            datefmt='%H:%M:%S'
-        )
+        handler = logging.StreamHandler()
+        handler.setFormatter(ColorFormatter(datefmt="%H:%M:%S"))
+        logging.basicConfig(level=level, handlers=[handler])
         # obsws_python logs connection parameters — including the WebSocket
         # password — at INFO level. Suppress it so the password never appears
         # in the console (which streamers often show on stream).
         logging.getLogger("obsws_python").setLevel(logging.WARNING)
+
+    def _print_banner(self):
+        """Print the startup banner with the active configuration."""
+        hotkey = self.config.get('hotkey', 'g').upper()
+        mode = self.config.get('mode', 'toggle')
+        scene = self.config.get('scene_name') or "current live scene"
+        fade_ms = self.config.get('fade_ms', 0)
+        reveal_ms = self.config.get('reveal_time_ms', 0)
+        reconnect_s = self.config.get('reconnect_interval_s', 5)
+
+        if mode == 'hold':
+            mode_line = f"hold {hotkey} to cover · release to uncover"
+        else:
+            mode_line = f"tap {hotkey} to flip the cover on/off"
+
+        rows = [
+            ("mode", mode_line),
+            ("hotkey", hotkey),
+        ]
+        if self.pin_hotkey:
+            rows.append(
+                ("pin", f"{self.pin_hotkey.upper()} keeps the cover on without holding")
+            )
+        rows.append(
+            ("cover", f"'{self.config['source_name']}' in '{scene}'")
+        )
+        rows.append(("obs", f"{self.config['obs_host']}:{self.config['obs_port']}"))
+        extras = []
+        extras.append(f"fade {fade_ms} ms" if fade_ms else "no fade")
+        extras.append(f"reveal {reveal_ms} ms" if reveal_ms else "instant hide")
+        extras.append(f"reconnect {reconnect_s} s")
+        rows.append(("extras", " · ".join(extras)))
+
+        bar = "─" * 60
+        print(_c(bar, DIM))
+        print(
+            _c(f"  {APP_NAME} ", BOLD, CYAN)
+            + _c(f"v{APP_VERSION}", GREY)
+            + _c("  ·  anti stream-sniping cover", GREY)
+        )
+        print(_c(bar, DIM))
+        for key, value in rows:
+            print(f"  {_c(f'{key:<9}', GREY)} {value}")
+        print(_c(bar, DIM))
+        print(flush=True)
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
@@ -166,8 +274,12 @@ class MapToggler:
             else:
                 self.obs_client.set_scene_item_enabled(scene_name, item_id, visible)
 
-            action = "shown" if visible else "hidden"
-            logging.info(f"Source '{self.config['source_name']}' {action}")
+            if visible:
+                logging.info(
+                    _c("● COVER ON   — map hidden from viewers", GREEN, BOLD)
+                )
+            else:
+                logging.info(_c("○ COVER OFF  — map visible again", GREY))
 
         except Exception as e:
             logging.error(f"Failed to set source visibility: {e}")
@@ -253,7 +365,7 @@ class MapToggler:
                     self.reveal_timer.cancel()
                     self.reveal_timer = None
                 self._set_source_visibility(False)
-                logging.info(f"Pin released by '{self.pin_hotkey}' - cover hidden")
+                logging.info(_c("○ COVER OFF  — pin released", GREY))
             else:
                 # Pin: cancel any pending hide, show the cover, keep it on
                 self._reveal_token += 1  # invalidate any pending reveal hide
@@ -264,7 +376,7 @@ class MapToggler:
                 self.source_visible = True
                 self._set_source_visibility(True)
                 logging.info(
-                    f"Cover PINNED by '{self.pin_hotkey}' - press G to release"
+                    _c(f"■ COVER PINNED — press {self.config.get('hotkey', 'g').upper()} to release", YELLOW, BOLD)
                 )
             self.last_action_time = time.time() * 1000
 
@@ -295,7 +407,9 @@ class MapToggler:
                     self.reveal_timer.cancel()
                     self.reveal_timer = None
                 self.last_action_time = time.time() * 1000
-                logging.info("Pin released by G - cover stays on (hold), release G to hide")
+                logging.info(
+                    _c("● COVER ON   — pin released into hold, release to uncover", GREEN)
+                )
                 return
 
             if mode == 'toggle':
@@ -402,7 +516,7 @@ class MapToggler:
 
     def run(self):
         """Main run loop"""
-        logging.info("Starting Map Hider for Streamers...")
+        self._print_banner()
 
         # Start reconnection thread
         reconnect_thread = threading.Thread(target=self._reconnect_loop, daemon=True)
@@ -421,7 +535,7 @@ class MapToggler:
             keyboard.add_hotkey(self.pin_hotkey, self._toggle_pin, suppress=False)
             logging.info(
                 f"Pin hotkey '{self.pin_hotkey}' - press to pin cover, "
-                f"G to release"
+                f"'{hotkey}' to release"
             )
 
         logging.info(f"Listening for '{hotkey}' key in {self.config.get('mode', 'toggle')} mode")

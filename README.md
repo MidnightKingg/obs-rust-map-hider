@@ -26,7 +26,7 @@ When you open your map on stream, viewers can screenshot your position and relay
 ## Quick start (Windows)
 
 1. **Set up OBS** — enable the WebSocket server (details below)
-2. **Double-click `run_toggle_map.bat`** — it finds Python 3.10+ (offering to install it if missing), installs dependencies, and starts the script
+2. **Double-click `run_toggle_map.bat`** — it finds any Python 3.9+ (offering to install one if missing), installs dependencies, and starts the script
 3. **Copy `config.example.json` to `config.json`**, fill in your OBS WebSocket password and your source/scene names, and restart the script
 
 That's it. Open your map in-game and press `G`.
@@ -142,9 +142,11 @@ When `fade_ms > 0` the script animates this filter's opacity. If the filter is m
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.9+ — any modern Python 3 works (tested through 3.14; the Windows launcher finds an interpreter automatically)
 - OBS Studio 28+ (bundled obs-websocket v5) with the WebSocket server enabled
 - Windows recommended; Linux works with root (macOS is not supported by the `keyboard` library)
+
+> The console uses colors when the terminal supports them (Windows Terminal, modern conhost, any Linux terminal). Set the `NO_COLOR` environment variable to disable them.
 
 ## License
 
